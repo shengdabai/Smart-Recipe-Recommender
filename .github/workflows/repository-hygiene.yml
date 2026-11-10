@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check JavaScript and regression tests
+        run: |
+          node --check app.js
+          node --check recipes.js
+          node --test test/app.test.cjs
+
       - name: Check repository guardrails
         shell: bash
         run: |
