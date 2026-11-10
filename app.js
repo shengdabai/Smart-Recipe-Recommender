@@ -1,11 +1,37 @@
+const AppStorage = {
+  getItem(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+
+  setItem(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      console.warn('无法保存本地数据，本次更改仅在当前页面有效。');
+    }
+  },
+
+  removeItem(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      console.warn('无法清除浏览器存储，请检查浏览器的存储权限。');
+    }
+  }
+};
+
 const GLM_API = {
-  key: localStorage.getItem('glm_api_key') || '',
+  key: AppStorage.getItem('glm_api_key') || '',
   url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
   model: 'glm-4-flash',
 
   setKey(key) {
     this.key = key;
-    localStorage.setItem('glm_api_key', key);
+    AppStorage.setItem('glm_api_key', key);
   },
 
   async chat(messages) {
@@ -115,20 +141,24 @@ const App = {
 
   loadState() {
     try {
-      const saved = localStorage.getItem('cook_app_state');
-      if (!saved) return;
-
-      const parsed = JSON.parse(saved);
-      this.state.fridge = (parsed.fridge || []).map((item, index) => this.normalizeFridgeItem(item, index)).filter(Boolean);
+      const parsed = JSON.parse(AppStorage.getItem('cook_app_state') || '{}') || {};
+      this.state.fridge = (Array.isArray(parsed.fridge) ? parsed.fridge : [])
+        .map((item, index) => this.normalizeFridgeItem(item, index)).filter(Boolean);
       this.state.servings = this.clampNumber(parsed.servings, 1, 10, 2);
       this.state.dishCount = this.clampNumber(parsed.dishCount, 1, 5, 3);
-      this.state.preference = PREFERENCE_PRESETS[parsed.preference] ? parsed.preference : 'light';
-      this.state.chatMessages = Array.isArray(parsed.chatMessages) ? parsed.chatMessages : [];
-      this.state.page = parsed.page === 'fridge' ? 'planner' : parsed.page || 'planner';
-      this.state.ingredientDraft = {
-        ...this.state.ingredientDraft,
-        ...(parsed.ingredientDraft || {})
-      };
+      this.state.preference = Object.hasOwn(PREFERENCE_PRESETS, parsed.preference) ? parsed.preference : 'light';
+      this.state.chatMessages = (Array.isArray(parsed.chatMessages) ? parsed.chatMessages : [])
+        .filter(message => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
+        .map(({ role, content }) => ({ role, content }));
+      this.state.page = ['planner', 'recipes', 'chat', 'settings'].includes(parsed.page) ? parsed.page : 'planner';
+      for (const field of ['name', 'amount', 'unit', 'category']) {
+        if (typeof parsed.ingredientDraft?.[field] === 'string') {
+          this.state.ingredientDraft[field] = parsed.ingredientDraft[field];
+        }
+      }
+      if (!Object.hasOwn(CATEGORY_DEFAULTS, this.state.ingredientDraft.category)) {
+        this.state.ingredientDraft.category = '其他';
+      }
     } catch (error) {
       console.warn('状态读取失败，已回退默认配置。', error);
     }
@@ -138,7 +168,7 @@ const App = {
   },
 
   saveState() {
-    localStorage.setItem('cook_app_state', JSON.stringify({
+    AppStorage.setItem('cook_app_state', JSON.stringify({
       fridge: this.state.fridge,
       servings: this.state.servings,
       dishCount: this.state.dishCount,
@@ -150,9 +180,9 @@ const App = {
   },
 
   normalizeFridgeItem(item, index) {
-    if (!item?.name) return null;
+    if (typeof item?.name !== 'string' || !item.name.trim()) return null;
     const guessed = this.getIngredientMeta(item.name, item.category);
-    const category = item.category || guessed.category || '其他';
+    const category = Object.hasOwn(CATEGORY_DEFAULTS, item.category) ? item.category : guessed.category || '其他';
     const fallback = this.getDefaultInventoryPreset(item.name, category);
 
     return {
@@ -177,6 +207,11 @@ const App = {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  },
+
+  inlineArg(value) {
+    // Encode the JavaScript string literal AND its enclosing HTML attribute.
+    return this.escapeHtml(JSON.stringify(value));
   },
 
   formatMarkdown(text) {
@@ -250,7 +285,9 @@ const App = {
   },
 
   getIngredientMeta(name, fallbackCategory) {
-    return INGREDIENT_LOOKUP[name] || { emoji: '🥣', category: fallbackCategory || '其他' };
+    return Object.hasOwn(INGREDIENT_LOOKUP, name)
+      ? INGREDIENT_LOOKUP[name]
+      : { emoji: '🥣', category: Object.hasOwn(CATEGORY_DEFAULTS, fallbackCategory) ? fallbackCategory : '其他' };
   },
 
   getDefaultInventoryPreset(name, category) {
@@ -264,7 +301,7 @@ const App = {
       };
     }
 
-    return CATEGORY_DEFAULTS[category] || CATEGORY_DEFAULTS.其他;
+    return Object.hasOwn(CATEGORY_DEFAULTS, category) ? CATEGORY_DEFAULTS[category] : CATEGORY_DEFAULTS.其他;
   },
 
   compareIngredientInventory(ingredient) {
@@ -757,7 +794,7 @@ const App = {
     return `
       <nav class="app-nav">
         ${tabs.map(([page, shortLabel, longLabel]) => `
-          <button class="nav-link ${this.state.page === page ? 'active' : ''}" onclick='App.navigate(${JSON.stringify(page)})'>
+          <button class="nav-link ${this.state.page === page ? 'active' : ''}" onclick='App.navigate(${this.inlineArg(page)})'>
             <span>${shortLabel}</span>
             <strong>${longLabel}</strong>
           </button>
@@ -862,7 +899,7 @@ const App = {
                 <span class="control-label">分类</span>
                 <div class="chip-row compact-chips">
                   ${['肉类', '蛋奶', '蔬菜', '主食', '调料', '饮品/其他', '其他'].map(category => `
-                    <button class="category-chip ${draft.category === category ? 'active' : ''}" onclick='App.setDraftCategory(${JSON.stringify(category)})'>
+                    <button class="category-chip ${draft.category === category ? 'active' : ''}" onclick='App.setDraftCategory(${this.inlineArg(category)})'>
                       ${this.escapeHtml(category)}
                     </button>
                   `).join('')}
@@ -914,7 +951,7 @@ const App = {
               </div>
               <div class="chip-row">
                 ${Object.entries(PREFERENCE_PRESETS).map(([key, value]) => `
-                  <button class="pref-chip ${key === this.state.preference ? 'active' : ''}" onclick='App.setPreference(${JSON.stringify(key)})'>
+                  <button class="pref-chip ${key === this.state.preference ? 'active' : ''}" onclick='App.setPreference(${this.inlineArg(key)})'>
                     ${this.escapeHtml(value.label)}
                   </button>
                 `).join('')}
@@ -973,13 +1010,13 @@ const App = {
                         </div>
                       </div>
                       <div class="inventory-qty">
-                        <button onclick='App.nudgeIngredient(${JSON.stringify(item.name)}, -1)'>−</button>
+                        <button onclick='App.nudgeIngredient(${this.inlineArg(item.name)}, -1)'>−</button>
                         <strong>${this.escapeHtml(item.amount)}${this.escapeHtml(item.unit)}</strong>
-                        <button onclick='App.nudgeIngredient(${JSON.stringify(item.name)}, 1)'>+</button>
+                        <button onclick='App.nudgeIngredient(${this.inlineArg(item.name)}, 1)'>+</button>
                       </div>
                       <div class="inventory-actions">
-                        <button class="text-button" onclick='App.editIngredient(${JSON.stringify(item.name)})'>编辑</button>
-                        <button class="text-button danger" onclick='App.removeFromFridge(${JSON.stringify(item.name)})'>删除</button>
+                        <button class="text-button" onclick='App.editIngredient(${this.inlineArg(item.name)})'>编辑</button>
+                        <button class="text-button danger" onclick='App.removeFromFridge(${this.inlineArg(item.name)})'>删除</button>
                       </div>
                     </div>
                   `;
@@ -1012,7 +1049,7 @@ const App = {
 
             <div class="chip-row category-row">
               ${['全部', ...Object.keys(INGREDIENT_CATEGORIES)].map(category => `
-                <button class="category-chip ${category === this.state.activeCategory ? 'active' : ''}" onclick='App.setActiveCategory(${JSON.stringify(category)})'>
+                <button class="category-chip ${category === this.state.activeCategory ? 'active' : ''}" onclick='App.setActiveCategory(${this.inlineArg(category)})'>
                   ${this.escapeHtml(category)}
                 </button>
               `).join('')}
@@ -1022,7 +1059,7 @@ const App = {
               ${suggestionRows.length ? suggestionRows.map(item => {
                 const hasItem = this.state.fridge.some(entry => entry.name === item.name);
                 return `
-                  <button class="suggestion-chip ${hasItem ? 'selected' : ''}" onclick='App.applySuggestedIngredient(${JSON.stringify(item.name)}, ${JSON.stringify(item.category)})'>
+                  <button class="suggestion-chip ${hasItem ? 'selected' : ''}" onclick='App.applySuggestedIngredient(${this.inlineArg(item.name)}, ${this.inlineArg(item.category)})'>
                     <span>${this.escapeHtml(item.emoji)}</span>
                     <strong>${this.escapeHtml(item.name)}</strong>
                   </button>
@@ -1157,7 +1194,7 @@ const App = {
           </div>
           <div class="header-actions">
             <span class="status-pill ${detail.statusTone}">${this.escapeHtml(detail.statusLabel)}</span>
-            <button class="secondary-button" onclick='App.askAboutRecipe(${JSON.stringify(detail.name)})'>问厨师技巧</button>
+            <button class="secondary-button" onclick='App.askAboutRecipe(${this.inlineArg(detail.name)})'>问厨师技巧</button>
           </div>
         </header>
 
@@ -1277,14 +1314,14 @@ const App = {
         <div class="chat-layout panel">
           <div class="chat-hints">
             ${['这周想吃得更健康，怎么搭配？', '鸡翅更嫩一点怎么做？', '少买两样调料也能完成吗？'].map(prompt => `
-              <button class="hint-chip" onclick='App.fillPrompt(${JSON.stringify(prompt)})'>${this.escapeHtml(prompt)}</button>
+              <button class="hint-chip" onclick='App.fillPrompt(${this.inlineArg(prompt)})'>${this.escapeHtml(prompt)}</button>
             `).join('')}
           </div>
 
           <div class="chat-messages" id="chat-messages">
             ${this.state.chatMessages.length
               ? this.state.chatMessages.map(message => `
-                <div class="chat-msg ${message.role}">
+                <div class="chat-msg ${message.role === 'user' ? 'user' : 'assistant'}">
                   <strong>${message.role === 'user' ? '你' : '厨师助手'}</strong>
                   <div class="chat-bubble">${this.formatMarkdown(message.content)}</div>
                 </div>
@@ -1408,7 +1445,7 @@ const App = {
 
           <div class="modal-actions">
             ${this.state.modal.mode === 'edit'
-              ? `<button class="secondary-button danger" onclick='App.deleteIngredientFromModal(${JSON.stringify(this.state.modal.originalName)})'>删除这项</button>`
+              ? `<button class="secondary-button danger" onclick='App.deleteIngredientFromModal(${this.inlineArg(this.state.modal.originalName)})'>删除这项</button>`
               : '<span></span>'
             }
             <button class="primary-button" onclick="App.saveIngredientFromModal()">保存到库存</button>
@@ -1437,7 +1474,7 @@ const App = {
   },
 
   setPreference(preference) {
-    if (!PREFERENCE_PRESETS[preference]) return;
+    if (!Object.hasOwn(PREFERENCE_PRESETS, preference)) return;
     this.state.preference = preference;
     this.saveState();
     this.render();
@@ -1677,8 +1714,8 @@ const App = {
   clearData() {
     if (!confirm('确定清空库存、聊天记录和设置吗？')) return;
 
-    localStorage.removeItem('cook_app_state');
-    localStorage.removeItem('glm_api_key');
+    AppStorage.removeItem('cook_app_state');
+    AppStorage.removeItem('glm_api_key');
     GLM_API.key = '';
     this.state = {
       ...this.state,
